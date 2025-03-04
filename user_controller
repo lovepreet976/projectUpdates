@@ -1,0 +1,96 @@
+// 🔍 Search Books by Title, Author, Publisher
+package controllers
+
+import (
+	"library-management/config"
+	"library-management/models"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+// 🔍 Search Books by Title, Author, Publisher (ONLY in User's Libraries)
+func SearchBooks(c *gin.Context) {
+	// ✅ Extract User ID from JWT
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized request"})
+		return
+	}
+
+	// ✅ Fetch the libraries where the user is registered
+	var userLibraries []uint
+	if err := config.DB.Table("user_libraries").Where("user_id = ?", userID).Pluck("library_id", &userLibraries).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch user libraries"})
+		return
+	}
+
+	// 🔴 If the user is not registered in any library, return an empty list
+	if len(userLibraries) == 0 {
+		c.JSON(http.StatusOK, gin.H{"books": []gin.H{}})
+		return
+	}
+
+	// ✅ Extract search parameters
+	title := c.Query("title")
+	author := c.Query("author")
+	publisher := c.Query("publisher")
+
+	var books []models.Book
+	query := config.DB.Where("library_id IN (?)", userLibraries) // ✅ Filter books by user's libraries
+
+	// 🔎 Apply search filters dynamically
+	if title != "" {
+		query = query.Where("title ILIKE ?", "%"+title+"%")
+	}
+	if author != "" {
+		query = query.Where("authors ILIKE ?", "%"+author+"%")
+	}
+	if publisher != "" {
+		query = query.Where("publisher ILIKE ?", "%"+publisher+"%")
+	}
+
+	// 🔎 Fetch matching books
+	if err := query.Find(&books).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error searching books"})
+		return
+	}
+
+	// 🔄 Prepare response with availability details
+	var response []gin.H
+	for _, book := range books {
+		// 🛠 Ensure `authors` is always returned
+		authors := book.Authors
+		if authors == "" {
+			authors = "Unknown"
+		}
+
+		bookData := gin.H{
+			"isbn":             book.ISBN,
+			"title":            book.Title,
+			"author":           authors,
+			"publisher":        book.Publisher,
+			"available_copies": book.AvailableCopies,
+		}
+
+		// 📅 If unavailable, find next available date
+		if book.AvailableCopies == 0 {
+			var nextAvailableDate time.Time
+			var issue models.IssueRegistry
+
+			if err := config.DB.Where("isbn = ?", book.ISBN).
+				Order("expected_return_date ASC").
+				First(&issue).Error; err == nil {
+				nextAvailableDate = time.Unix(issue.ExpectedReturnDate, 0)
+				bookData["next_available_date"] = nextAvailableDate.Format("2006-01-02 15:04:05")
+			} else {
+				bookData["next_available_date"] = "Unknown"
+			}
+		}
+
+		response = append(response, bookData)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"books": response})
+}
