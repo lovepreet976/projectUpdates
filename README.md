@@ -289,3 +289,222 @@ Copy code
     }
 }
 
+
+
+new updations>>>
+package controllers
+
+import (
+	"library-management/config"
+	"library-management/models"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+// 🔍 Search Books by Title, Author, Publisher
+func SearchBooks(c *gin.Context) {
+	title := c.Query("title")
+	author := c.Query("author")
+	publisher := c.Query("publisher")
+
+	var books []models.Book
+	query := config.DB
+
+	if title != "" {
+		query = query.Where("title ILIKE ?", "%"+title+"%")
+	}
+	if author != "" {
+		query = query.Where("authors ILIKE ?", "%"+author+"%") // Fix column name
+	}
+	if publisher != "" {
+		query = query.Where("publisher ILIKE ?", "%"+publisher+"%")
+	}
+
+	if err := query.Find(&books).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error searching books"})
+		return
+	}
+
+	// ✅ Check availability and fetch next available date if needed
+	var response []gin.H
+	for _, book := range books {
+		bookData := gin.H{
+			"isbn":             book.ISBN,
+			"title":            book.Title,
+			"author":           book.Authors, // Fix column name
+			"publisher":        book.Publisher,
+			"available_copies": book.AvailableCopies,
+		}
+
+		if book.AvailableCopies == 0 {
+			var nextAvailableDate time.Time
+			var issue models.IssueRegistry
+
+			// Find the earliest expected return date
+			if err := config.DB.Where("isbn = ?", book.ISBN).
+				Order("expected_return_date ASC").
+				First(&issue).Error; err == nil {
+				nextAvailableDate = time.Unix(issue.ExpectedReturnDate, 0)
+				bookData["next_available_date"] = nextAvailableDate.Format("2006-01-02 15:04:05")
+			} else {
+				bookData["next_available_date"] = "Unknown"
+			}
+		}
+
+		response = append(response, bookData)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"books": response})
+}
+
+issue,,
+
+package controllers
+
+import (
+	"library-management/config"
+	"library-management/models"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+// 📄 List Issue Requests
+func ListIssueRequests(c *gin.Context) {
+	var requests []models.RequestEvent
+	if err := config.DB.Find(&requests).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch issue requests"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"requests": requests})
+}
+
+// ✅ Approve Issue Request
+func ApproveIssue(c *gin.Context) {
+	requestID := c.Param("id")
+	var request models.RequestEvent
+
+	if err := config.DB.First(&request, requestID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Issue request not found"})
+		return
+	}
+
+	if request.ApprovalDate != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Request is already approved"})
+		return
+	}
+
+	var book models.Book
+	if err := config.DB.Where("isbn = ?", request.BookID).First(&book).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
+		return
+	}
+
+	if book.AvailableCopies == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No available copies to issue"})
+		return
+	}
+
+	// ✅ Just approve, don't reduce copies here
+	now := time.Now().Unix()
+	request.ApprovalDate = &now
+
+	if err := config.DB.Save(&request).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not approve request"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Issue request approved", "request": request})
+}
+
+// ❌ Disapprove Issue Request
+func DisapproveIssue(c *gin.Context) {
+	requestID := c.Param("id")
+	var request models.RequestEvent
+
+	if err := config.DB.First(&request, requestID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Issue request not found"})
+		return
+	}
+
+	config.DB.Delete(&request)
+	c.JSON(http.StatusOK, gin.H{"message": "Issue request disapproved"})
+}
+
+// 🔄 Issue Book to a User
+func IssueBookToUser(c *gin.Context) {
+	isbn := c.Param("isbn")
+
+	// ✅ Extract Admin ID from JWT
+	adminID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized request"})
+		return
+	}
+
+	// ✅ Parse JSON Input
+	var input struct {
+		UserID uint `json:"user_id"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON format"})
+		return
+	}
+
+	// ✅ Ensure Book Exists
+	var book models.Book
+	if err := config.DB.Where("isbn = ?", isbn).First(&book).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
+		return
+	}
+
+	// ✅ Check if Book is Available
+	if book.AvailableCopies == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No available copies to issue"})
+		return
+	}
+
+	// ✅ Reduce Available Copies
+	book.AvailableCopies--
+	config.DB.Save(&book)
+
+	// ✅ Set Issue & Return Dates
+	issueDate := time.Now()
+	expectedReturnDate := issueDate.AddDate(0, 0, 14) // 2 weeks later
+
+	// ✅ Record the Issue in `IssueRegistry`
+	issueRecord := models.IssueRegistry{
+		ISBN:               isbn,
+		ReaderID:           input.UserID,
+		IssueApproverID:    adminID.(uint),
+		IssueStatus:        "issued",
+		IssueDate:          issueDate.Unix(),
+		ExpectedReturnDate: expectedReturnDate.Unix(),
+		ReturnDate:         0,
+		ReturnApproverID:   0,
+	}
+
+	if err := config.DB.Create(&issueRecord).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not issue book"})
+		return
+	}
+
+	// ✅ Format Dates for Readable Response
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Book issued successfully",
+		"issue": gin.H{
+			"id":                   issueRecord.ID,
+			"reader_id":            issueRecord.ReaderID,
+			"isbn":                 issueRecord.ISBN,
+			"issue_status":         issueRecord.IssueStatus,
+			"issue_date":           issueDate.Format("2006-01-02 15:04:05"),
+			"expected_return_date": expectedReturnDate.Format("2006-01-02 15:04:05"),
+		},
+	})
+}
+
+
+
