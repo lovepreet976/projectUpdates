@@ -1,0 +1,196 @@
+package controllers
+
+import (
+	"library-management/config"
+	"library-management/models"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+// 📄 List Issue Requests
+func ListIssueRequests(c *gin.Context) {
+	var requests []models.RequestEvent
+	if err := config.DB.Find(&requests).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch issue requests"})
+		return
+	}
+
+	formattedRequests := make([]gin.H, len(requests))
+	for i, request := range requests {
+		formattedRequests[i] = gin.H{
+			"id":            request.ID,
+			"book_id":       request.BookID,
+			"user_id":       request.ReaderID,
+			"request_type":  request.RequestType,
+			"request_date":  formatUnixTime(&request.RequestDate),
+			"approval_date": formatUnixTime(request.ApprovalDate),
+			"approver_id":   request.ApproverID,
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"requests": formattedRequests})
+}
+
+// ✅ Approve Issue Request
+func ApproveIssue(c *gin.Context) {
+	requestID := c.Param("id")
+	var request models.RequestEvent
+
+	// Check if request exists
+	if err := config.DB.First(&request, requestID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Issue request not found"})
+		return
+	}
+
+	// Check if request is already approved
+	if request.ApprovalDate != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Request is already approved"})
+		return
+	}
+
+	// ✅ Extract Admin ID from JWT (the one approving the request)
+	adminID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized request"})
+		return
+	}
+
+	// Fetch book details
+	var book models.Book
+	if err := config.DB.Where("isbn = ?", request.BookID).First(&book).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
+		return
+	}
+
+	// Check if book is available
+	if book.AvailableCopies == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No available copies to issue"})
+		return
+	}
+
+	// ✅ Approve request: Set ApprovalDate and ApproverID
+	now := time.Now().Unix()
+	request.ApprovalDate = &now
+	request.ApproverID = new(uint) // Allocate memory before assigning value
+	*request.ApproverID = adminID.(uint)
+
+	// ✅ Save updated request
+	if err := config.DB.Save(&request).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not approve request"})
+		return
+	}
+
+	// ✅ Verify if ApproverID was updated
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Issue request approved",
+		"request_id":    request.ID,
+		"book_id":       request.BookID,
+		"user_id":       request.ReaderID,
+		"approval_date": formatUnixTime(request.ApprovalDate),
+		"approver_id":   request.ApproverID, // Ensure it's included in the response
+	})
+}
+
+// ❌ Disapprove Issue Request
+func DisapproveIssue(c *gin.Context) {
+	requestID := c.Param("id")
+	var request models.RequestEvent
+
+	if err := config.DB.First(&request, requestID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Issue request not found"})
+		return
+	}
+
+	config.DB.Delete(&request)
+	c.JSON(http.StatusOK, gin.H{"message": "Issue request disapproved"})
+}
+
+// 🔄 Issue Book to a User
+func IssueBookToUser(c *gin.Context) {
+	isbn := c.Param("isbn")
+
+	// ✅ Extract Admin ID from JWT
+	adminID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized request"})
+		return
+	}
+
+	// ✅ Parse JSON Input
+	var input struct {
+		UserID    uint `json:"user_id"`
+		LibraryID uint `json:"library_id"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON format"})
+		return
+	}
+
+	// ✅ Ensure User is Registered in the Provided Library
+	var user models.User
+	if err := config.DB.Where("id = ? AND library_id = ?", input.UserID, input.LibraryID).First(&user).Error; err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "User not registered in this library"})
+		return
+	}
+
+	// ✅ Ensure Book Exists in the Given Library
+	var book models.Book
+	if err := config.DB.Where("isbn = ? AND library_id = ?", isbn, input.LibraryID).First(&book).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Book not found in this library"})
+		return
+	}
+
+	// ✅ Check if Book is Available
+	if book.AvailableCopies == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No available copies to issue"})
+		return
+	}
+
+	// ✅ Reduce Available Copies
+	book.AvailableCopies--
+	config.DB.Save(&book)
+
+	// ✅ Set Issue & Return Dates
+	issueDate := time.Now()
+	expectedReturnDate := issueDate.AddDate(0, 0, 14) // 2 weeks later
+
+	// ✅ Record the Issue in `IssueRegistry`
+	issueRecord := models.IssueRegistry{
+		ISBN:               isbn,
+		ReaderID:           input.UserID,
+		IssueApproverID:    adminID.(uint),
+		IssueStatus:        "issued",
+		IssueDate:          issueDate.Unix(),
+		ExpectedReturnDate: expectedReturnDate.Unix(),
+		ReturnDate:         0,
+		ReturnApproverID:   0,
+	}
+
+	if err := config.DB.Create(&issueRecord).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not issue book"})
+		return
+	}
+
+	// ✅ Format Dates for Readable Response
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Book issued successfully",
+		"issue": gin.H{
+			"id":                   issueRecord.ID,
+			"reader_id":            issueRecord.ReaderID,
+			"isbn":                 issueRecord.ISBN,
+			"issue_status":         issueRecord.IssueStatus,
+			"issue_date":           issueDate.Format("2006-01-02 15:04:05"),
+			"expected_return_date": expectedReturnDate.Format("2006-01-02 15:04:05"),
+		},
+	})
+}
+
+// Helper function to format Unix timestamp
+func formatUnixTime(timestamp *int64) string {
+	if timestamp == nil || *timestamp == 0 {
+		return "N/A"
+	}
+	return time.Unix(*timestamp, 0).Format("2006-01-02 15:04:05")
+}
