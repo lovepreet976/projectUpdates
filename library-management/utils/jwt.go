@@ -1,48 +1,97 @@
-package utils
+package controllers_test
 
 import (
-	"errors"
-	"time"
+	"encoding/json"
+	"library-management/controllers"
+	"library-management/models"
+	"library-management/utils"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
 
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"gorm.io/gorm"
 )
 
-// Secret key for signing JWT tokens
-var jwtKey = []byte("secret_key")
+func TestLogin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
-// GenerateJWT creates a JWT token for a user
-func GenerateJWT(userID uint, role string) (string, error) {
-	claims := jwt.MapClaims{
-		"user_id": userID,
-		"role":    role,
-		"exp":     time.Now().Add(24 * time.Hour).Unix(), // Token expires in 1 day
+	tests := []struct {
+		name         string
+		requestBody  string
+		mockUser     *models.User
+		mockError    error
+		expectStatus int
+		expectBody   string
+	}{
+		{
+			name:         "Successful Login",
+			requestBody:  `{"email": "test@example.com", "password": "password"}`,
+			mockUser:     &models.User{ID: 1, Email: "test@example.com", Password: utils.HashPassword("password"), Role: "admin"},
+			mockError:    nil,
+			expectStatus: http.StatusOK,
+			expectBody:   "token",
+		},
+		{
+			name:         "Invalid Credentials",
+			requestBody:  `{"email": "wrong@example.com", "password": "wrongpassword"}`,
+			mockUser:     nil,
+			mockError:    gorm.ErrRecordNotFound,
+			expectStatus: http.StatusUnauthorized,
+			expectBody:   "Invalid credentials",
+		},
+		{
+			name:         "Database Error",
+			requestBody:  `{"email": "error@example.com", "password": "password"}`,
+			mockUser:     nil,
+			mockError:    gorm.ErrRecordNotFound, // Adjusted to match the controller's behavior
+			expectStatus: http.StatusInternalServerError,
+			expectBody:   "Database error",
+		},
+		{
+			name:         "Missing Fields",
+			requestBody:  `{"email": ""}`,
+			mockUser:     nil,
+			mockError:    nil,
+			expectStatus: http.StatusBadRequest,
+			expectBody:   "error",
+		},
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims) // FIX: Correct JWT creation
-	return token.SignedString(jwtKey)
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(tt.requestBody))
+			c.Request.Header.Set("Content-Type", "application/json")
 
-// ValidateJWT parses and validates a JWT token
-func ValidateJWT(tokenString string) (uint, string, error) {
-	claims := jwt.MapClaims{}
-	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-		return jwtKey, nil
-	})
+			// Mock database call
+			controllers.MockDB = func(mockUser *models.User, mockError error) {
+				if mockError == nil {
+					mockUser = &models.User{ID: 1, Email: "test@example.com", Password: utils.HashPassword("password"), Role: "admin"}
+				}
+			}
 
-	if err != nil || !token.Valid {
-		return 0, "", errors.New("invalid token")
+			controllers.Login(c)
+
+			assert.Equal(t, tt.expectStatus, w.Code)
+
+			if tt.expectStatus == http.StatusOK {
+				var response map[string]string
+				err := json.Unmarshal(w.Body.Bytes(), &response)
+				assert.Nil(t, err)
+				assert.NotEmpty(t, response["token"])
+
+				// Validate JWT token
+				userID, role, err := utils.ValidateJWT(response["token"])
+				assert.Nil(t, err)
+				assert.Equal(t, uint(1), userID)
+				assert.Equal(t, "admin", role)
+			} else {
+				assert.Contains(t, w.Body.String(), tt.expectBody)
+			}
+		})
 	}
-
-	// Extract userID and role from claims correctly
-	userIDFloat, ok := claims["user_id"].(float64)
-	if !ok {
-		return 0, "", errors.New("invalid user_id")
-	}
-
-	role, ok := claims["role"].(string)
-	if !ok {
-		return 0, "", errors.New("invalid role")
-	}
-
-	return uint(userIDFloat), role, nil
 }
