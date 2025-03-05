@@ -1,0 +1,146 @@
+package tests
+
+import (
+	"bytes"
+	"encoding/json"
+	"library-management/controllers"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+)
+
+// Setup mock database
+func setupIssueTestDB(t *testing.T) sqlmock.Sqlmock {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	return mock
+}
+
+// ✅ Test Successful Book Issue (By Admin)
+func TestIssueBookSuccess(t *testing.T) {
+	mockDB := setupIssueTestDB(t)
+
+	// Mock checking if requester is an admin
+	mockDB.ExpectQuery("SELECT role FROM users WHERE id = ?").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"role"}).AddRow("admin"))
+
+	// Mock checking if user is registered in the library
+	mockDB.ExpectQuery("SELECT COUNT\\(\\*\\) FROM user_libraries WHERE user_id = ? AND library_id = ?").
+		WithArgs(2, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+
+	// Mock checking if book exists and is available
+	mockDB.ExpectQuery("SELECT available_copies FROM books WHERE isbn = ? AND library_id = ?").
+		WithArgs("978-3-16-148410-0", 1).
+		WillReturnRows(sqlmock.NewRows([]string{"available_copies"}).AddRow(5))
+
+	// Mock updating available copies
+	mockDB.ExpectExec("UPDATE books SET available_copies = available_copies - 1 WHERE isbn = ? AND library_id = ?").
+		WithArgs("978-3-16-148410-0", 1).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Mock inserting issue record
+	mockDB.ExpectExec("INSERT INTO issue_registry").
+		WithArgs("978-3-16-148410-0", 2, 1, "issued", sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	router := gin.Default()
+	router.POST("/api/issue/book/:isbn", controllers.IssueBookToUser)
+
+	// Request body
+	body := map[string]interface{}{
+		"user_id":    2,
+		"library_id": 1,
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, _ := http.NewRequest("POST", "/api/issue/book/978-3-16-148410-0", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mock-admin-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Book issued successfully")
+}
+
+// ❌ Test Issuing Book to Unregistered User
+func TestIssueBookToUnregisteredUser(t *testing.T) {
+	mockDB := setupIssueTestDB(t)
+
+	// Mock checking if requester is an admin
+	mockDB.ExpectQuery("SELECT role FROM users WHERE id = ?").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"role"}).AddRow("admin"))
+
+	// Mock checking if user is **not** registered in the library
+	mockDB.ExpectQuery("SELECT COUNT\\(\\*\\) FROM user_libraries WHERE user_id = ? AND library_id = ?").
+		WithArgs(2, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	router := gin.Default()
+	router.POST("/api/issue/book/:isbn", controllers.IssueBookToUser)
+
+	// Request body
+	body := map[string]interface{}{
+		"user_id":    2,
+		"library_id": 1,
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, _ := http.NewRequest("POST", "/api/issue/book/978-3-16-148410-0", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mock-admin-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "User is not registered in this library")
+}
+
+// ❌ Test Issuing Book When No Copies Available
+func TestIssueBookNoCopiesAvailable(t *testing.T) {
+	mockDB := setupIssueTestDB(t)
+
+	// Mock checking if requester is an admin
+	mockDB.ExpectQuery("SELECT role FROM users WHERE id = ?").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"role"}).AddRow("admin"))
+
+	// Mock checking if user is registered in the library
+	mockDB.ExpectQuery("SELECT COUNT\\(\\*\\) FROM user_libraries WHERE user_id = ? AND library_id = ?").
+		WithArgs(2, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+
+	// Mock checking if book exists but no available copies
+	mockDB.ExpectQuery("SELECT available_copies FROM books WHERE isbn = ? AND library_id = ?").
+		WithArgs("978-3-16-148410-0", 1).
+		WillReturnRows(sqlmock.NewRows([]string{"available_copies"}).AddRow(0)) // No copies available
+
+	router := gin.Default()
+	router.POST("/api/issue/book/:isbn", controllers.IssueBookToUser)
+
+	// Request body
+	body := map[string]interface{}{
+		"user_id":    2,
+		"library_id": 1,
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, _ := http.NewRequest("POST", "/api/issue/book/978-3-16-148410-0", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mock-admin-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "No available copies to issue")
+}

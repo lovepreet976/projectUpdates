@@ -1,0 +1,139 @@
+package tests
+
+import (
+	"bytes"
+	"encoding/json"
+	"library-management/controllers"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+)
+
+// Setup mock database
+func setupBookTestDB(t *testing.T) sqlmock.Sqlmock {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	return mock
+}
+
+// ✅ Test Successful Book Addition (By Admin)
+func TestAddBookSuccess(t *testing.T) {
+	mockDB := setupBookTestDB(t)
+
+	// Mock checking if the requester is an admin
+	mockDB.ExpectQuery("SELECT role, library_id FROM users WHERE id = ?").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"role", "library_id"}).AddRow("admin", 1))
+
+	// Mock inserting book into DB
+	mockDB.ExpectExec("INSERT INTO books").
+		WithArgs("978-3-16-148410-0", "Go Programming", "Author A", "Tech Books", "1st", 10, 10, 1).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	router := gin.Default()
+	router.POST("/api/book", controllers.AddBook)
+
+	// Request body
+	body := map[string]interface{}{
+		"isbn":             "978-3-16-148410-0",
+		"title":            "Go Programming",
+		"authors":          "Author A",
+		"publisher":        "Tech Books",
+		"version":          "1st",
+		"total_copies":     10,
+		"available_copies": 10,
+		"library_id":       1,
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, _ := http.NewRequest("POST", "/api/book", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mock-admin-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	assert.Contains(t, w.Body.String(), "Book added successfully")
+}
+
+// ❌ Test Adding Book by Non-Admin (Forbidden)
+func TestAddBookByNonAdmin(t *testing.T) {
+	mockDB := setupBookTestDB(t)
+
+	// Mock checking if the requester is a user (not admin)
+	mockDB.ExpectQuery("SELECT role FROM users WHERE id = ?").
+		WithArgs(2).
+		WillReturnRows(sqlmock.NewRows([]string{"role"}).AddRow("user"))
+
+	router := gin.Default()
+	router.POST("/api/book", controllers.AddBook)
+
+	// Request body
+	body := map[string]interface{}{
+		"isbn":         "978-3-16-148410-0",
+		"title":        "Unauthorized Book",
+		"authors":      "Fake Author",
+		"publisher":    "Unknown",
+		"total_copies": 5,
+		"library_id":   1,
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, _ := http.NewRequest("POST", "/api/book", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mock-user-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "Only admins can manage books")
+}
+
+// ✅ Test Searching Books (Public API)
+func TestSearchBooksSuccess(t *testing.T) {
+	mockDB := setupBookTestDB(t)
+
+	// Mock returning books from DB
+	mockDB.ExpectQuery("SELECT * FROM books WHERE title ILIKE ? AND library_id = ?").
+		WithArgs("%Go%", 1).
+		WillReturnRows(sqlmock.NewRows([]string{"isbn", "title", "authors", "publisher", "available_copies", "library_id"}).
+			AddRow("978-3-16-148410-0", "Go Programming", "Author A", "Tech Books", 5, 1))
+
+	router := gin.Default()
+	router.GET("/api/books/search", controllers.SearchBooks)
+
+	req, _ := http.NewRequest("GET", "/api/books/search?title=Go&library_id=1", nil)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Go Programming")
+}
+
+// ❌ Test Searching Books with No Results
+func TestSearchBooksNoResults(t *testing.T) {
+	mockDB := setupBookTestDB(t)
+
+	// Mock empty search results
+	mockDB.ExpectQuery("SELECT * FROM books WHERE title ILIKE ? AND library_id = ?").
+		WithArgs("%Unknown%", 1).
+		WillReturnRows(sqlmock.NewRows([]string{})) // No results
+
+	router := gin.Default()
+	router.GET("/api/books/search", controllers.SearchBooks)
+
+	req, _ := http.NewRequest("GET", "/api/books/search?title=Unknown&library_id=1", nil)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "[]") // Empty array response
+}

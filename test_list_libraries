@@ -1,0 +1,67 @@
+package tests
+
+import (
+	"encoding/json"
+	"library-management/controllers"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+)
+
+// Setup mock database
+func setupListLibrariesTestDB(t *testing.T) sqlmock.Sqlmock {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	return mock
+}
+
+// ✅ Test Successfully Listing Libraries
+func TestListLibrariesSuccess(t *testing.T) {
+	mockDB := setupListLibrariesTestDB(t)
+
+	// Mock returning libraries from DB
+	mockDB.ExpectQuery("SELECT * FROM libraries").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "location"}).
+			AddRow(1, "Central Library", "Downtown").
+			AddRow(2, "Westside Library", "West End"))
+
+	router := gin.Default()
+	router.GET("/libraries", controllers.ListLibraries)
+
+	req, _ := http.NewRequest("GET", "/libraries", nil)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string][]map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	assert.NoError(t, err)
+	assert.Len(t, response["libraries"], 2)
+	assert.Equal(t, "Central Library", response["libraries"][0]["name"])
+}
+
+// ❌ Test Listing Libraries When None Exist
+func TestListLibrariesEmpty(t *testing.T) {
+	mockDB := setupListLibrariesTestDB(t)
+
+	// Mock empty library list
+	mockDB.ExpectQuery("SELECT * FROM libraries").
+		WillReturnRows(sqlmock.NewRows([]string{})) // No results
+
+	router := gin.Default()
+	router.GET("/libraries", controllers.ListLibraries)
+
+	req, _ := http.NewRequest("GET", "/libraries", nil)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "[]") // Empty array response
+}

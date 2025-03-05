@@ -1,0 +1,110 @@
+package tests
+
+import (
+	"bytes"
+	"encoding/json"
+	"library-management/controllers"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+)
+
+// Setup mock database
+func setupCreateLibraryTestDB(t *testing.T) sqlmock.Sqlmock {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	return mock
+}
+
+// ✅ Test Successfully Creating a Library (By Owner)
+func TestCreateLibrarySuccess(t *testing.T) {
+	mockDB := setupCreateLibraryTestDB(t)
+
+	// Mock checking if requester is an owner
+	mockDB.ExpectQuery("SELECT role FROM users WHERE id = ?").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"role"}).AddRow("owner"))
+
+	// Mock inserting library into DB
+	mockDB.ExpectExec("INSERT INTO libraries").
+		WithArgs("Central Library", "Downtown").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	router := gin.Default()
+	router.POST("/api/library", controllers.CreateLibrary)
+
+	// Request body
+	body := map[string]interface{}{
+		"name":     "Central Library",
+		"location": "Downtown",
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, _ := http.NewRequest("POST", "/api/library", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mock-owner-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	assert.Contains(t, w.Body.String(), "Library created successfully")
+}
+
+// ❌ Test Creating Library Without Owner Privileges
+func TestCreateLibraryUnauthorized(t *testing.T) {
+	mockDB := setupCreateLibraryTestDB(t)
+
+	// Mock checking if requester is not an owner
+	mockDB.ExpectQuery("SELECT role FROM users WHERE id = ?").
+		WithArgs(2).
+		WillReturnRows(sqlmock.NewRows([]string{"role"}).AddRow("admin"))
+
+	router := gin.Default()
+	router.POST("/api/library", controllers.CreateLibrary)
+
+	// Request body
+	body := map[string]interface{}{
+		"name":     "Unauthorized Library",
+		"location": "Restricted Area",
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, _ := http.NewRequest("POST", "/api/library", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mock-admin-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "Only owners can create libraries")
+}
+
+// ❌ Test Creating a Library with Missing Fields
+func TestCreateLibraryMissingFields(t *testing.T) {
+	mockDB := setupCreateLibraryTestDB(t)
+
+	router := gin.Default()
+	router.POST("/api/library", controllers.CreateLibrary)
+
+	// Missing location field
+	body := map[string]interface{}{
+		"name": "Incomplete Library",
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, _ := http.NewRequest("POST", "/api/library", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mock-owner-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "error")
+}

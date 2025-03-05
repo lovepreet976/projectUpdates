@@ -1,0 +1,68 @@
+package tests
+
+import (
+	"encoding/json"
+	"library-management/controllers"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+)
+
+// Setup mock database
+func setupSearchBooksTestDB(t *testing.T) sqlmock.Sqlmock {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	return mock
+}
+
+// ✅ Test Successful Book Search (By Title & Library ID)
+func TestSearchBooksSuccess(t *testing.T) {
+	mockDB := setupSearchBooksTestDB(t)
+
+	// Mock searching books in the library
+	mockDB.ExpectQuery("SELECT * FROM books WHERE library_id = ? AND title ILIKE ?").
+		WithArgs(1, "%Go%").
+		WillReturnRows(sqlmock.NewRows([]string{"isbn", "title", "authors", "publisher", "available_copies", "library_id"}).
+			AddRow("978-3-16-148410-0", "Go Programming", "Author A", "Tech Books", 5, 1))
+
+	router := gin.Default()
+	router.GET("/api/books/search", controllers.SearchBooks)
+
+	req, _ := http.NewRequest("GET", "/api/books/search?title=Go&library_id=1", nil)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string][]map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	assert.NoError(t, err)
+	assert.Len(t, response["books"], 1)
+	assert.Equal(t, "Go Programming", response["books"][0]["title"])
+}
+
+// ❌ Test Searching Books with No Results
+func TestSearchBooksNoResults(t *testing.T) {
+	mockDB := setupSearchBooksTestDB(t)
+
+	// Mock empty search results
+	mockDB.ExpectQuery("SELECT * FROM books WHERE library_id = ? AND title ILIKE ?").
+		WithArgs(1, "%Unknown%").
+		WillReturnRows(sqlmock.NewRows([]string{})) // No results
+
+	router := gin.Default()
+	router.GET("/api/books/search", controllers.SearchBooks)
+
+	req, _ := http.NewRequest("GET", "/api/books/search?title=Unknown&library_id=1", nil)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "[]") // Empty array response
+}

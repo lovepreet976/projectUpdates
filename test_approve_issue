@@ -1,0 +1,91 @@
+package tests
+
+import (
+	"database/sql"
+	"library-management/controllers"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+)
+
+// Setup mock database
+func setupApproveIssueTestDB(t *testing.T) sqlmock.Sqlmock {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	return mock
+}
+
+// ✅ Test Approving an Issue Request Successfully
+func TestApproveIssueSuccess(t *testing.T) {
+	mockDB := setupApproveIssueTestDB(t)
+
+	// Mock checking if request exists and is pending
+	mockDB.ExpectQuery("SELECT * FROM request_events WHERE id = ?").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "approval_date"}).AddRow(1, nil))
+
+	// Mock updating request approval status
+	mockDB.ExpectExec("UPDATE request_events SET approval_date = ? WHERE id = ?").
+		WithArgs(sqlmock.AnyArg(), 1).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	router := gin.Default()
+	router.PUT("/api/issue/approve/:id", controllers.ApproveIssue)
+
+	req, _ := http.NewRequest("PUT", "/api/issue/approve/1", nil)
+	req.Header.Set("Authorization", "Bearer mock-admin-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Issue request approved")
+}
+
+// ❌ Test Approving a Non-Existent Request
+func TestApproveIssueNotFound(t *testing.T) {
+	mockDB := setupApproveIssueTestDB(t)
+
+	// Mock checking if request does not exist
+	mockDB.ExpectQuery("SELECT * FROM request_events WHERE id = ?").
+		WithArgs(99).
+		WillReturnError(sql.ErrNoRows)
+
+	router := gin.Default()
+	router.PUT("/api/issue/approve/:id", controllers.ApproveIssue)
+
+	req, _ := http.NewRequest("PUT", "/api/issue/approve/99", nil)
+	req.Header.Set("Authorization", "Bearer mock-admin-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "Issue request not found")
+}
+
+// ❌ Test Approving an Already Approved Request
+func TestApproveIssueAlreadyApproved(t *testing.T) {
+	mockDB := setupApproveIssueTestDB(t)
+
+	// Mock checking if request is already approved
+	mockDB.ExpectQuery("SELECT * FROM request_events WHERE id = ?").
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "approval_date"}).AddRow(1, 1700000000)) // Already approved
+
+	router := gin.Default()
+	router.PUT("/api/issue/approve/:id", controllers.ApproveIssue)
+
+	req, _ := http.NewRequest("PUT", "/api/issue/approve/1", nil)
+	req.Header.Set("Authorization", "Bearer mock-admin-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "Request is already approved")
+}

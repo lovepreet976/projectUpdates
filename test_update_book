@@ -1,0 +1,122 @@
+package tests
+
+import (
+	"bytes"
+	"database/sql"
+	"encoding/json"
+	"library-management/controllers"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+)
+
+// Setup mock database
+func setupUpdateBookTestDB(t *testing.T) sqlmock.Sqlmock {
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	return mock
+}
+
+// ✅ Test Successfully Updating a Book (By Admin)
+func TestUpdateBookSuccess(t *testing.T) {
+	mockDB := setupUpdateBookTestDB(t)
+
+	// Mock checking if book exists
+	mockDB.ExpectQuery("SELECT * FROM books WHERE isbn = ?").
+		WithArgs("978-3-16-148410-0").
+		WillReturnRows(sqlmock.NewRows([]string{"isbn", "title", "total_copies", "available_copies"}).
+			AddRow("978-3-16-148410-0", "Old Title", 10, 10))
+
+	// Mock updating book details
+	mockDB.ExpectExec("UPDATE books SET title = ?, authors = ?, publisher = ?, version = ?, total_copies = ? WHERE isbn = ?").
+		WithArgs("Updated Title", "New Author", "New Publisher", "2nd Edition", 15, "978-3-16-148410-0").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	router := gin.Default()
+	router.PUT("/api/book/:isbn", controllers.UpdateBook)
+
+	// Request body
+	body := map[string]interface{}{
+		"title":        "Updated Title",
+		"authors":      "New Author",
+		"publisher":    "New Publisher",
+		"version":      "2nd Edition",
+		"total_copies": 15,
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, _ := http.NewRequest("PUT", "/api/book/978-3-16-148410-0", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mock-admin-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Book updated successfully")
+}
+
+// ❌ Test Updating a Book That Doesn't Exist
+func TestUpdateBookNotFound(t *testing.T) {
+	mockDB := setupUpdateBookTestDB(t)
+
+	// Mock checking if book does not exist
+	mockDB.ExpectQuery("SELECT * FROM books WHERE isbn = ?").
+		WithArgs("978-3-16-148410-0").
+		WillReturnError(sql.ErrNoRows)
+
+	router := gin.Default()
+	router.PUT("/api/book/:isbn", controllers.UpdateBook)
+
+	// Request body
+	body := map[string]interface{}{
+		"title":        "Non-Existent Book",
+		"total_copies": 10,
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, _ := http.NewRequest("PUT", "/api/book/978-3-16-148410-0", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mock-admin-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "Book not found")
+}
+
+// ❌ Test Prevent Updating Total Copies Below Issued Copies
+func TestUpdateBookInvalidTotalCopies(t *testing.T) {
+	mockDB := setupUpdateBookTestDB(t)
+
+	// Mock checking if book exists and has issued copies
+	mockDB.ExpectQuery("SELECT * FROM books WHERE isbn = ?").
+		WithArgs("978-3-16-148410-0").
+		WillReturnRows(sqlmock.NewRows([]string{"isbn", "title", "total_copies", "available_copies"}).
+			AddRow("978-3-16-148410-0", "Existing Book", 10, 5)) // 5 copies are issued
+
+	router := gin.Default()
+	router.PUT("/api/book/:isbn", controllers.UpdateBook)
+
+	// Request body
+	body := map[string]interface{}{
+		"title":        "Updated Title",
+		"total_copies": 4, // Less than issued copies
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, _ := http.NewRequest("PUT", "/api/book/978-3-16-148410-0", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer mock-admin-token")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "Total copies cannot be less than issued copies")
+}
