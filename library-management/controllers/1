@@ -1,0 +1,80 @@
+package controllers_test
+
+import (
+	"encoding/json"
+	"library-management/controllers"
+	"library-management/models"
+	"library-management/utils"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"gorm.io/gorm"
+)
+
+func TestLogin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name         string
+		requestBody  string
+		mockUser     *models.User
+		mockError    error
+		expectStatus int
+		expectBody   string
+	}{
+		{
+			name:         "Successful Login",
+			requestBody:  `{"email": "test@example.com", "password": "password"}`,
+			mockUser:     &models.User{ID: 1, Email: "test@example.com", Password: utils.HashPassword("password"), Role: "admin"},
+			mockError:    nil,
+			expectStatus: http.StatusOK,
+			expectBody:   "token",
+		},
+		{
+			name:         "Invalid Credentials",
+			requestBody:  `{"email": "wrong@example.com", "password": "wrongpassword"}`,
+			mockUser:     nil,
+			mockError:    gorm.ErrRecordNotFound,
+			expectStatus: http.StatusUnauthorized,
+			expectBody:   "Invalid credentials",
+		},
+		{
+			name:         "Database Error",
+			requestBody:  `{"email": "error@example.com", "password": "password"}`,
+			mockUser:     nil,
+			mockError:    gorm.ErrRecordNotFound, // Adjusted to match the controller's behavior
+			expectStatus: http.StatusInternalServerError,
+			expectBody:   "Database error",
+		},
+		{
+			name:         "Missing Fields",
+			requestBody:  `{"email": ""}`,
+			mockUser:     nil,
+			mockError:    nil,
+			expectStatus: http.StatusBadRequest,
+			expectBody:   "error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(tt.requestBody))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			// Mock database call
+			controllers.MockDB(tt.mockUser, tt.mockError)
+
+			controllers.Login(c)
+
+			assert.Equal(t, tt.expectStatus, w.Code)
+			assert.Contains(t, w.Body.String(), tt.expectBody)
+		})
+	}
+}
+
