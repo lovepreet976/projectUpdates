@@ -1,0 +1,114 @@
+package controllers_test
+
+import (
+	"encoding/json"
+	"errors"
+	"library-management/controllers"
+	"library-management/models"
+	"library-management/utils"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"gorm.io/gorm"
+)
+
+// Mock function to simulate database behavior
+var mockFindUserByEmail func(email string) (*models.User, error)
+
+// Override the actual database call with the mock function
+func init() {
+	controllers.FindUserByEmail = func(email string) (*models.User, error) {
+		return mockFindUserByEmail(email)
+	}
+}
+
+func TestLogin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name         string
+		requestBody  string
+		mockUser     *models.User
+		mockError    error
+		expectStatus int
+		expectBody   string
+	}{
+		{
+			name:        "Successful Login",
+			requestBody: `{"email": "test@example.com", "password": "password"}`,
+			mockUser: &models.User{
+				ID:       1,
+				Email:    "test@example.com",
+				Password: utils.HashPassword("password"),
+				Role:     "admin",
+			},
+			mockError:    nil,
+			expectStatus: http.StatusOK,
+			expectBody:   "token",
+		},
+		{
+			name:         "Invalid Credentials",
+			requestBody:  `{"email": "wrong@example.com", "password": "wrongpassword"}`,
+			mockUser:     nil,
+			mockError:    gorm.ErrRecordNotFound,
+			expectStatus: http.StatusUnauthorized,
+			expectBody:   "Invalid credentials",
+		},
+		{
+			name:         "Database Error",
+			requestBody:  `{"email": "error@example.com", "password": "password"}`,
+			mockUser:     nil,
+			mockError:    errors.New("database error"),
+			expectStatus: http.StatusInternalServerError,
+			expectBody:   "Database error",
+		},
+		{
+			name:         "Missing Fields",
+			requestBody:  `{"email": ""}`,
+			mockUser:     nil,
+			mockError:    nil,
+			expectStatus: http.StatusBadRequest,
+			expectBody:   "error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(tt.requestBody))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			// Set the mock function behavior
+			mockFindUserByEmail = func(email string) (*models.User, error) {
+				if tt.mockUser != nil && tt.mockUser.Email == email {
+					return tt.mockUser, nil
+				}
+				return nil, tt.mockError
+			}
+
+			controllers.Login(c)
+
+			assert.Equal(t, tt.expectStatus, w.Code)
+
+			if tt.expectStatus == http.StatusOK {
+				var response map[string]string
+				err := json.Unmarshal(w.Body.Bytes(), &response)
+				assert.Nil(t, err)
+				assert.NotEmpty(t, response["token"])
+
+				// Validate JWT token
+				userID, role, err := utils.ValidateJWT(response["token"])
+				assert.Nil(t, err)
+				assert.Equal(t, uint(1), userID)
+				assert.Equal(t, "admin", role)
+			} else {
+				assert.Contains(t, w.Body.String(), tt.expectBody)
+			}
+		})
+	}
+}
